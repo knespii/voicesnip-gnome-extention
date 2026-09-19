@@ -21,5 +21,9 @@ ydotool
 ydotoold
 wl-clipboard
 
+# On-screen overlay (GTK3; VoiceSnip degrades silently without it)
+python3-gi
+gir1.2-gtk-3.0
+
 git
 pkg-config

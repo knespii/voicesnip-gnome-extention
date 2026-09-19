@@ -23,6 +23,9 @@ class AudioRecorder:
         self.is_recording = threading.Event()
         self.audio_data = []
         self.audio_data_lock = threading.Lock()
+        # RMS of the most recent block (0.0-1.0 of full scale), for the
+        # overlay's level meter.
+        self.level = 0.0
         self.stream = None
 
     def audio_callback(self, indata, frames, time_info, status):
@@ -32,6 +35,9 @@ class AudioRecorder:
         if self.is_recording.is_set():
             with self.audio_data_lock:
                 self.audio_data.append(indata.copy())
+            # A plain float store: the level feed reads it from another thread,
+            # and a value one block stale is harmless.
+            self.level = float(np.sqrt(np.mean(np.square(indata, dtype=np.float64)))) / 32768
 
     def start_recording(self):
         """Start audio recording
