@@ -272,6 +272,10 @@ def check_system_packages_linux(package_file: str) -> Tuple[List[str], List[str]
     for package in packages:
         if package in installed_set:
             installed.append(package)
+        elif shutil.which(package):
+            # Built from source or installed outside dpkg (e.g. /usr/local/bin).
+            # dpkg-query cannot see those, so accept a matching binary on PATH.
+            installed.append(package)
         else:
             missing.append(package)
 
