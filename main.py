@@ -22,6 +22,7 @@ License: MIT License
 GitHub: https://github.com/Stefan-Schmidbauer/voicesnip
 """
 
+import argparse
 import os
 import sys
 import customtkinter as ctk
@@ -54,8 +55,36 @@ def load_config_file():
 load_config_file()
 
 
+def arm_hotkey(root, app):
+    """Press Start on the user's behalf when launched with --background.
+
+    On success the window is withdrawn: unmapped entirely, so it leaves no
+    dock entry and nothing in the overview - the top-bar extension is how
+    VoiceSnip is reached from then on. On failure the window stays up,
+    because the reason is on it.
+
+    The outcome also goes to stdout: run unattended, a hotkey that failed to
+    arm otherwise looks exactly like one that worked.
+    """
+    app.start()
+    if app.core is not None:
+        print("Background: hotkey armed, window hidden.", flush=True)
+        root.withdraw()
+    else:
+        print("Background: hotkey NOT armed - see the window for the reason.",
+              flush=True)
+
+
 def main():
     """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description="VoiceSnip - push-to-talk speech-to-text")
+    parser.add_argument(
+        "--background", action="store_true",
+        help="arm the hotkey immediately and hide the window; used by the "
+             "top-bar extension")
+    args = parser.parse_args()
+
     # Load installation config
     config = load_installation_config()
 
@@ -76,6 +105,11 @@ def main():
     root = ctk.CTk()
     app = VoiceSnipGUI(root, installation_config=config)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
+
+    if args.background:
+        # The widgets are filled from the saved config while the window is
+        # built, so let Tk settle before start() reads them back.
+        root.after(1500, lambda: arm_hotkey(root, app))
 
     try:
         root.mainloop()
