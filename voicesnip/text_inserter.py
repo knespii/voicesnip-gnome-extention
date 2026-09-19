@@ -8,8 +8,21 @@ The display server is detected at runtime:
   - Wayland: the text is placed on the clipboard (wl-copy) and pasted with
              Ctrl+V via ydotool. Typing per keystroke is avoided on Wayland
              because ydotool maps characters to US keycodes, which corrupts
-             non-US layouts (e.g. German QWERTZ) and drops non-ASCII
-             characters like umlauts. Clipboard paste is layout/unicode-safe.
+             non-US layouts (e.g. German QWERTZ, Czech QWERTZ) and drops
+             non-ASCII characters like umlauts or caron/acute letters.
+             Clipboard paste is layout/unicode-safe.
+
+Environment overrides (Wayland path):
+  YDOTOOL_SOCKET            explicit path to the ydotoold socket
+  VOICESNIP_PASTE_SHORTCUT  shortcut used to paste (default "ctrl+v"; use
+                            "ctrl+shift+v" for terminal emulators)
+  VOICESNIP_INSERT_METHOD   "paste" (default) or "type" to type the text
+                            keystroke by keystroke instead, for applications
+                            that ignore Ctrl+V. Typing goes through
+                            xkb_typer, which maps characters to keys using the
+                            active layout; it falls back to pasting when the
+                            layout cannot produce a character.
+  VOICESNIP_KEY_DELAY_MS    delay between key events while typing (default 4)
 """
 
 import os
@@ -18,13 +31,32 @@ import subprocess
 import tempfile
 import time
 
+from . import xkb_typer
 from .constants import is_wayland
 
 CHAR_DELAY_MS = 12
 SPACE_PAUSE_S = 0.04
 
-# ydotool's daemon listens on this socket by default.
-YDOTOOL_SOCKET = os.environ.get("YDOTOOL_SOCKET", "/tmp/.ydotool_socket")
+# Where ydotoold puts its socket depends on the version: 1.0 and newer use
+# $XDG_RUNTIME_DIR/.ydotool_socket, 0.1.x used /tmp/.ydotool_socket. Probe both
+# so a self-compiled daemon is found as well as the Debian/Ubuntu package.
+YDOTOOL_SOCKET_ENV = os.environ.get("YDOTOOL_SOCKET")
+
+# Shortcut used to paste. Terminal emulators need ctrl+shift+v instead.
+PASTE_SHORTCUT = os.environ.get("VOICESNIP_PASTE_SHORTCUT", "ctrl+v").strip().lower()
+
+# "paste" (clipboard, layout- and unicode-safe) or "type" (ydotool type).
+INSERT_METHOD = os.environ.get("VOICESNIP_INSERT_METHOD", "paste").strip().lower()
+
+# Raw evdev keycodes from linux/input-event-codes.h. ydotool >= 1.0 dropped the
+# key-name syntax ("ctrl+v") and only accepts "<keycode>:<pressed>" pairs.
+_MODIFIER_KEYCODES = {
+    "ctrl": 29, "control": 29,
+    "shift": 42,
+    "alt": 56,
+    "super": 125, "meta": 125, "win": 125,
+}
+_KEYCODES = {"v": 47, "insert": 110}
 
 # After Ctrl+V, wait this long before restoring the previous clipboard so the
 # target application has consumed our paste first (avoids a race where it would
@@ -53,14 +85,35 @@ def insert_text(text):
 # Wayland: clipboard + ydotool Ctrl+V
 # ---------------------------------------------------------------------------
 
+def _socket_candidates():
+    """Paths where a running ydotoold may have put its socket."""
+    if YDOTOOL_SOCKET_ENV:
+        return [YDOTOOL_SOCKET_ENV]
+    paths = []
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        paths.append(os.path.join(runtime_dir, ".ydotool_socket"))  # ydotool >= 1.0
+    paths.append("/tmp/.ydotool_socket")                            # ydotool 0.1.x
+    return paths
+
+
+def _find_ydotool_socket():
+    """Return the first existing ydotoold socket, or None."""
+    for path in _socket_candidates():
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def _ensure_ydotoold():
     """Make sure the ydotoold daemon is running; start it on demand if not.
 
     Returns:
-        True if the daemon socket is available, False otherwise.
+        The path of the daemon socket, or None if it never appeared.
     """
-    if os.path.exists(YDOTOOL_SOCKET):
-        return True
+    socket_path = _find_ydotool_socket()
+    if socket_path:
+        return socket_path
     try:
         # Detach so the daemon outlives this call.
         subprocess.Popen(
@@ -71,18 +124,104 @@ def _ensure_ydotoold():
         )
     except FileNotFoundError:
         print("ydotoold not found. Please install: sudo apt install ydotoold")
-        return False
+        return None
     except Exception as e:
         print(f"Error starting ydotoold: {e}")
-        return False
+        return None
 
     # Wait briefly for the socket to appear.
     for _ in range(20):
-        if os.path.exists(YDOTOOL_SOCKET):
-            return True
+        socket_path = _find_ydotool_socket()
+        if socket_path:
+            # The daemon creates its virtual keyboard right after the socket;
+            # give the compositor a moment to pick the new device up.
+            time.sleep(0.3)
+            return socket_path
         time.sleep(0.1)
-    print("ydotoold did not create its socket in time")
+    print("ydotoold did not create its socket in time "
+          "(checked: %s)" % ", ".join(_socket_candidates()))
+    return None
+
+
+def _ydotool_env(socket_path):
+    """Environment for ydotool calls, pinned to the socket we found."""
+    env = os.environ.copy()
+    env["YDOTOOL_SOCKET"] = socket_path
+    return env
+
+
+def _shortcut_keycodes(shortcut):
+    """Translate "ctrl+shift+v" into ydotool >= 1.0 "<keycode>:<pressed>" args.
+
+    Returns None when the shortcut contains a key this module has no keycode
+    for; the caller then falls back to the ydotool 0.1.x key-name syntax.
+    """
+    parts = [p for p in shortcut.split("+") if p]
+    if not parts:
+        return None
+    modifiers, key = parts[:-1], parts[-1]
+    if key not in _KEYCODES:
+        return None
+    try:
+        modifier_codes = [_MODIFIER_KEYCODES[m] for m in modifiers]
+    except KeyError:
+        return None
+    key_code = _KEYCODES[key]
+    return (
+        [f"{code}:1" for code in modifier_codes]
+        + [f"{key_code}:1", f"{key_code}:0"]
+        + [f"{code}:0" for code in reversed(modifier_codes)]
+    )
+
+
+def _send_paste_shortcut(socket_path):
+    """Press the paste shortcut via ydotool.
+
+    ydotool >= 1.0 understands only raw keycode pairs, 0.1.x understands only
+    key names. Try keycodes first and fall back to the name syntax so both
+    versions work without probing the version.
+
+    Returns:
+        True if one of the syntaxes was accepted.
+    """
+    env = _ydotool_env(socket_path)
+    attempts = []
+    keycodes = _shortcut_keycodes(PASTE_SHORTCUT)
+    if keycodes:
+        attempts.append(keycodes)
+    attempts.append([PASTE_SHORTCUT])
+
+    for args in attempts:
+        try:
+            subprocess.run(
+                ["ydotool", "key"] + args,
+                check=True,
+                timeout=5.0,
+                env=env,
+            )
+            return True
+        except subprocess.CalledProcessError:
+            continue
+    print(f"ydotool rejected the paste shortcut '{PASTE_SHORTCUT}'")
     return False
+
+
+def _type_text_wayland(text, socket_path):
+    """Type the text keystroke by keystroke, honouring the active layout.
+
+    ydotool emits raw keycodes, so which character a keycode produces depends
+    on the layout the compositor has active. xkb_typer resolves that by
+    inverting the layout's own keymap.
+
+    Returns:
+        False when the layout cannot produce every character (or ydotool
+        failed), so the caller can fall back to the clipboard.
+    """
+    typed, unsupported = xkb_typer.type_text(text, env=_ydotool_env(socket_path))
+    if unsupported:
+        print("Not on the current keyboard layout ("
+              + "".join(sorted(set(unsupported))) + ") - pasting instead.")
+    return typed
 
 
 def _save_clipboard():
@@ -171,8 +310,20 @@ def _cleanup_clipboard_save(saved):
 
 
 def _insert_text_wayland(text):
-    """Place text on the clipboard, paste it with Ctrl+V, then restore the
-    previous clipboard contents (Wayland)."""
+    """Insert text under Wayland.
+
+    Default: put the text on the clipboard, press the paste shortcut, then
+    restore the previous clipboard contents. With VOICESNIP_INSERT_METHOD=type
+    the text is typed keystroke by keystroke instead and the clipboard is left
+    untouched.
+    """
+    if INSERT_METHOD == "type":
+        socket_path = _ensure_ydotoold()
+        if socket_path and _type_text_wayland(text, socket_path):
+            return
+        # Typing did not happen at all (xkb_typer types all or nothing), so
+        # falling through to the clipboard cannot duplicate anything.
+
     saved = _save_clipboard()
     pasted = False
     try:
@@ -190,26 +341,20 @@ def _insert_text_wayland(text):
             print(f"Error copying text to clipboard: {e}")
             return
 
-        if not _ensure_ydotoold():
+        socket_path = _ensure_ydotoold()
+        if not socket_path:
             # Leave our text on the clipboard so the user can paste manually;
             # do not restore the old contents in that case.
-            print("Text is on the clipboard - paste manually with Ctrl+V.")
+            print("Text is on the clipboard - paste manually with "
+                  f"{PASTE_SHORTCUT.title()}.")
             return
 
         # Small settle time so the clipboard offer is ready before pasting.
         time.sleep(0.05)
         try:
-            # ydotool 0.1.8 'key' uses key-name syntax (ctrl+v), not code:state.
-            subprocess.run(
-                ["ydotool", "key", "ctrl+v"],
-                check=True,
-                timeout=5.0,
-            )
-            pasted = True
+            pasted = _send_paste_shortcut(socket_path)
         except FileNotFoundError:
             print("ydotool not found. Please install: sudo apt install ydotool")
-        except subprocess.CalledProcessError as e:
-            print(f"Error pasting text (ydotoold running? /dev/uinput access?): {e}")
         except subprocess.TimeoutExpired:
             print("Error: paste timed out (ydotoold daemon?)")
     finally:
