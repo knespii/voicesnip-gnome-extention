@@ -12,7 +12,8 @@ All processing happens locally on your machine - on the CPU or a GPU. No cloud, 
 - **Local Processing**: Whisper runs directly on your CPU or on your NVIDIA (CUDA) / AMD (ROCm) GPU
 - **Privacy-First**: All data stays on your device
 - **Configurable Hotkeys**: Any key combination (Ctrl+Space, Alt+R, etc.)
-- **Multi-Language**: 10 languages (German, English, French, Spanish, etc.) + Auto-Detection
+- **Multi-Language**: 11 languages (German, English, French, Spanish, Czech, etc.) + Auto-Detection
+- **On-Screen Overlay**: A capsule shows what it is hearing and what it transcribed, without stealing focus
 - **Dark/Light Mode**: Switch between dark and light themes
 - **Adjustable Font Size**: A-/A+ buttons to customize text size
 
@@ -57,6 +58,48 @@ The installer will ask you to choose a profile:
 2. Click "Start"
 3. Hold your hotkey (default: Ctrl+Space) and speak
 4. Release - text appears at your cursor
+
+## On-Screen Overlay
+
+While the hotkey is held, a capsule appears near the top of the screen: a
+waveform that follows your voice, the status, and then the finished transcript
+before it is typed at your cursor. It never takes keyboard focus, so whatever
+you were typing in stays focused the whole time, and it is click-through
+everywhere except the capsule itself.
+
+![Listening](assets/overlay/overlay-listening.png)
+
+The waveform's height follows the voice directly, but its shape follows a slow
+envelope - speech changes how tall it is without reshuffling its pattern on
+every syllable. While Whisper works, the capsule says so and the waveform runs
+on its own:
+
+![Transcribing](assets/overlay/overlay-transcribing.png)
+
+The transcript is shown before it is inserted. A long one grows the capsule
+downwards to at most 40% of the screen height and then scrolls:
+
+![Result](assets/overlay/overlay-result.png)
+
+It draws itself on rather than appearing: the lit outline is traced from the
+top-left corner while the capsule widens out of a narrow token, and the
+material follows just behind the tip. Leaving is the same gesture reversed.
+
+![Opening](assets/overlay/overlay-opening.png)
+
+A second click-through window lights the border of the display for as long as
+the overlay is up, so the machine listening to you is visible from the corner
+of your eye:
+
+![On screen](assets/overlay/overlay-screen.png)
+
+Set `VOICESNIP_OVERLAY=0` to turn the whole thing off. It needs GTK 3 from the
+distribution (`python3-gi`, `gir1.2-gtk-3.0`); if that is missing, VoiceSnip
+runs exactly as before without it.
+
+> The images are rendered by the overlay's own painting code over a neutral
+> background - they are not screenshots of anyone's desktop. The status labels
+> are Czech on this branch.
 
 ## Wayland Support
 
