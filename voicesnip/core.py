@@ -51,6 +51,7 @@ class VoiceSnipCore:
         # On-screen overlay. Purely cosmetic, so it is never allowed to raise.
         self.overlay = Overlay(
             enabled=os.environ.get("VOICESNIP_OVERLAY", "1") != "0")
+        self.overlay.prewarm()
         self._overlay_timer = None
 
         # Initialize provider dynamically
