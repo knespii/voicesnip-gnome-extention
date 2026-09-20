@@ -618,6 +618,11 @@ def _run():
 
     from . import overlay_edge
 
+    def _monitor_geometry():
+        display = Gdk.Display.get_default()
+        monitor = display.get_primary_monitor() or display.get_monitor(0)
+        return monitor.get_geometry()
+
     class EdgeWindow(Gtk.Window):
         """The glow around the screen, in the capsule's colours.
 
@@ -644,14 +649,12 @@ def _run():
             self.connect("draw", self._on_draw)
             self.realize()
             self.input_shape_combine_region(cairo.Region())
-            # Cut the middle out of the window itself, not just out of what we
-            # paint: the compositor then handles a frame-shaped surface instead
-            # of the whole display.
-            b = EDGE_BAND
-            frame = cairo.Region(cairo.RectangleInt(0, 0, geometry.width, geometry.height))
-            frame.subtract(cairo.Region(cairo.RectangleInt(
-                b, b, max(1, geometry.width - 2 * b), max(1, geometry.height - 2 * b))))
-            self.shape_combine_region(frame)
+            # The middle is deliberately NOT cut out of the window. Shaping it
+            # handed the compositor a frame instead of the whole display, which
+            # was cheaper - but a hard region boundary drawn on a fractionally
+            # scaled screen leaves a thin dark rectangle where the shape ends,
+            # a hundred pixels in from every edge. Alpha does the shaping now,
+            # and only the band is ever redrawn.
 
         def _on_draw(self, _widget, cr):
             cr.set_operator(cairo.OPERATOR_SOURCE)
@@ -684,6 +687,14 @@ def _run():
             cr.restore()
             return True
 
+        def reconfigure(self, geometry):
+            """Follow the display when it is rescaled or replugged."""
+            self.geometry = geometry
+            self.resize(geometry.width, geometry.height)
+            self.move(geometry.x, geometry.y)
+            self._small = None
+            self._small_at = None
+
         def prewarm(self):
             """Render the glow once before anything is waiting for it."""
             w, h = self.geometry.width, self.geometry.height
@@ -715,9 +726,7 @@ def _run():
             if visual is not None:
                 self.set_visual(visual)
 
-            display = Gdk.Display.get_default()
-            monitor = display.get_primary_monitor() or display.get_monitor(0)
-            geometry = monitor.get_geometry()
+            geometry = _monitor_geometry()
             self.scene = _Scene(max_height=int(geometry.height * MAX_H_FRACTION))
             self.edge = EdgeWindow(geometry)
 
@@ -892,10 +901,24 @@ def _run():
             the hitch is visible exactly when the state changes. It shrinks
             back the next time the overlay appears.
             """
+            # Where the screen is, now - not where it was when VoiceSnip
+            # started. Rescaling the display or replugging a monitor changes
+            # this, and a stale copy puts the capsule wherever the screen used
+            # to be and leaves it there for the rest of the session.
+            geometry = _monitor_geometry()
+            moved = (geometry.x, geometry.y, geometry.width, geometry.height) != \
+                (self.geometry.x, self.geometry.y,
+                 self.geometry.width, self.geometry.height)
+            if moved:
+                self.geometry = geometry
+                self.scene.max_h = int(geometry.height * MAX_H_FRACTION)
+                self.edge.reconfigure(geometry)
+
             target_w, target_h = self.scene.target_size()
             needed_w = int(math.ceil(target_w)) + 2 * MARGIN
             needed_h = int(math.ceil(target_h)) + 2 * MARGIN
-            if not appearing and needed_w <= self.canvas_w and needed_h <= self.canvas_h:
+            if not appearing and not moved and \
+                    needed_w <= self.canvas_w and needed_h <= self.canvas_h:
                 return
             self.canvas_w = max(needed_w, self.canvas_w if not appearing else 0)
             self.canvas_h = max(needed_h, self.canvas_h if not appearing else 0)
@@ -928,6 +951,11 @@ def _run():
                 self.scene.paint(cr, self.canvas_w, self.canvas_h, now,
                                  scale=self.get_scale_factor())
             surface.flush()
+            # Place and size the window now, while it is still unmapped. It is
+            # realized at the origin at its default size, and doing this at the
+            # first show raced the map: the capsule appeared at the edge of the
+            # screen for a frame and then jumped to the middle.
+            self._fit_window(appearing=True)
             self.scene.mode = "hidden"
             self.scene._morph = None
             self.scene._trace = None
@@ -944,6 +972,9 @@ def _run():
                 self._leaving = False
                 Gtk.Widget.set_opacity(self, 1.0)
                 Gtk.Widget.set_opacity(self.edge, 0.0)
+                # Let X apply the geometry before the window is mapped,
+                # so it is never composited at the wrong place.
+                Gdk.Display.get_default().sync()
                 self.show_all()
                 self.edge.show_all()
                 self._fade = (0.0, 1.0, now, None)
